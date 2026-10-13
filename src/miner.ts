@@ -5,7 +5,7 @@
  * tool call sequences that repeat across sessions. Groups them into
  * candidate workflow patterns that could become skills.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { WorkflowStep, WorkflowPattern } from "./types.js";
 
@@ -270,18 +270,67 @@ export function minePatterns(
 }
 
 /**
- * Load session file list from the session-search index.
+ * Session roots scanned when the session-search hybrid JSON index is absent
+ * (it is only written when an embedder is configured; FTS-only mode never creates it).
+ */
+const SESSION_DIRS = ["sessions", "sessions-archive"].map((d) =>
+  join(process.env.HOME || "~", ".pi", "agent", d),
+);
+
+export function sessionSourceAvailable(): boolean {
+  return existsSync(SESSION_INDEX_PATH) || SESSION_DIRS.some((d) => existsSync(d));
+}
+
+/**
+ * Fallback: list `<root>/<project>/<timestamp>_<uuid>.jsonl` session files directly.
+ */
+function scanSessionDirs(): { file: string; id: string; startedAt: string }[] {
+  const out: { file: string; id: string; startedAt: string }[] = [];
+  for (const root of SESSION_DIRS) {
+    let projects: string[];
+    try {
+      projects = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const project of projects) {
+      let files: string[];
+      try {
+        files = readdirSync(join(root, project));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        const m = f.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/);
+        if (!m) continue;
+        out.push({
+          file: join(root, project, f),
+          id: m[6],
+          startedAt: `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Load session file list from the session-search hybrid index when present,
+ * otherwise by scanning the pi session directories.
  */
 export function loadSessionList(): { file: string; id: string; startedAt: string }[] {
-  if (!existsSync(SESSION_INDEX_PATH)) return [];
-  try {
-    const raw = JSON.parse(readFileSync(SESSION_INDEX_PATH, "utf8"));
-    return Object.entries(raw.sessions || {}).map(([id, entry]: [string, any]) => ({
-      file: entry.session.file,
-      id,
-      startedAt: entry.session.startedAt,
-    }));
-  } catch {
-    return [];
+  if (existsSync(SESSION_INDEX_PATH)) {
+    try {
+      const raw = JSON.parse(readFileSync(SESSION_INDEX_PATH, "utf8"));
+      const list = Object.entries(raw.sessions || {}).map(([id, entry]: [string, any]) => ({
+        file: entry.session.file,
+        id,
+        startedAt: entry.session.startedAt,
+      }));
+      if (list.length > 0) return list;
+    } catch {
+      // fall through to directory scan
+    }
   }
+  return scanSessionDirs();
 }

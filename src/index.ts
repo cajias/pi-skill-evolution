@@ -21,7 +21,7 @@
 import type { ExtensionAPI, AgentToolResult } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { loadState, saveState, mergePatterns, mergeHealth } from "./store.js";
-import { minePatterns, loadSessionList } from "./miner.js";
+import { minePatterns, loadSessionList, sessionSourceAvailable } from "./miner.js";
 import { extractInvocations, computeHealth } from "./tracker.js";
 import { appendFeedback, readFeedback, countFeedback } from "./feedback.js";
 import type { EvolutionState, SkillProposal } from "./types.js";
@@ -38,6 +38,7 @@ const SKILLS_DIR = join(process.env.HOME || "~", ".pi", "agent", "skills");
 export default function (pi: ExtensionAPI) {
   let state: EvolutionState | null = null;
   let cachedCtx: any = null;
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
   let sessionSkillReads: string[] = []; // skills loaded this session (for tracking)
   let sessionId: string | undefined;
 
@@ -51,12 +52,14 @@ export default function (pi: ExtensionAPI) {
   // ─── Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    // A session switch can start again without a shutdown in between.
+    clearTimeout(statusTimer);
+    statusTimer = undefined;
     cachedCtx = ctx;
     sessionId = ctx.sessionManager?.getSessionFile()?.match(/([a-f0-9-]{36})/)?.[1];
     try {
-      // Check for session-search dependency
-      const sessionIndexPath = join(process.env.HOME || "~", ".pi", "session-search", "index", "session-index.json");
-      if (!existsSync(sessionIndexPath)) {
+      // Check for a session source (session-search hybrid index or pi session dirs)
+      if (!sessionSourceAvailable()) {
         ctx.ui.notify(
           "skill-evolution: session-search index not found. Install with: pi install npm:pi-session-search",
           "warning",
@@ -82,7 +85,7 @@ export default function (pi: ExtensionAPI) {
       // Nudge about pending proposals (but don't spam — only if >2)
       if (proposalCount > 2) {
         ctx.ui.setStatus("skill-evolution", `${proposalCount} skill proposals pending review`);
-        setTimeout(() => ctx.ui.setStatus("skill-evolution", ""), 10000);
+        statusTimer = setTimeout(() => ctx.ui.setStatus("skill-evolution", ""), 10000);
       }
 
       // Quiet status for degrading skills
@@ -91,7 +94,8 @@ export default function (pi: ExtensionAPI) {
           "skill-evolution",
           `${degrading.length} skill(s) trending down: ${degrading.map(h => h.skill).join(", ")}`,
         );
-        setTimeout(() => ctx.ui.setStatus("skill-evolution", ""), 8000);
+        clearTimeout(statusTimer);
+        statusTimer = setTimeout(() => ctx.ui.setStatus("skill-evolution", ""), 8000);
       }
     } catch (e: any) {
       ctx.ui.notify(`skill-evolution: ${e.message}`, "warning");
@@ -235,6 +239,8 @@ export default function (pi: ExtensionAPI) {
 
   // Auto-analyze on shutdown — like pi-memory's consolidation
   pi.on("session_shutdown", async () => {
+    clearTimeout(statusTimer);
+    statusTimer = undefined;
     if (!state) return;
 
     // Flush any remaining feedback for the current skill
