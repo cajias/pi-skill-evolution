@@ -107,7 +107,8 @@ export default function (pi: ExtensionAPI) {
     if (!state) return;
 
     // Check if the user's prompt mentions any skill names that have issues
-    const prompt = typeof event.prompt === "string" ? event.prompt : "";
+    // Pi 1.2.0 custom-message runs have no prompt; older hosts expose it directly.
+    const prompt = "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
     const healthEntries = Object.values(state.health);
     const relevantWarnings: string[] = [];
 

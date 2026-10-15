@@ -24,6 +24,11 @@ const cases = [
   'repeated start isolates old and new session contexts',
   'repeated start with no new status cancels old timer',
   'separate extension instances own separate timers',
+  'before_agent_start reads Pi 1.2.0 user prompt',
+  'before_agent_start ignores unrelated user prompt',
+  'before_agent_start skips Pi 1.2.0 custom message',
+  'before_agent_start reads legacy prompt-only event',
+  'before_agent_start leaves prompt unchanged before state loads',
 ];
 
 if (process.argv[2] !== '--worker') {
@@ -130,6 +135,50 @@ async function run(name) {
     }));
   };
   const handlers = makeInstance(); const first = context();
+  if (name.startsWith('before_agent_start')) {
+    const systemPrompt = 'Original system prompt mentioning synthetic-skill.';
+    const userEvent = {
+      type: 'before_agent_start', messageType: 'user', prompt: 'Please use SYNTHETIC SKILL.',
+      systemPrompt, systemPromptOptions: {},
+    };
+    const beforeStart = handlers.get('before_agent_start');
+    if (name.includes('before state loads')) {
+      assert.equal(await beforeStart(userEvent, first), undefined); return;
+    }
+    write(indexPath, '{"sessions":{}}');
+    write(path.join(process.env.HOME, '.pi/skill-evolution/state.json'), JSON.stringify({
+      version: 1, patterns: [], proposals: [], analyzedSessionIds: [], lastAnalysis: '',
+      health: { 'synthetic-skill': { skill: 'synthetic-skill', trend: 'stable', issues: [
+        { severity: 'warning', description: 'Synthetic warning', suggestion: 'Check the synthetic result.' },
+        { severity: 'info', description: 'Synthetic info', suggestion: 'Not a warning.' },
+      ] } },
+    }));
+    await handlers.get('session_start')({}, first);
+    assert.equal(first.notices.length, 0);
+    if (name.includes('unrelated')) {
+      assert.equal(await beforeStart({ ...userEvent, prompt: 'Please summarize this document.' }, first), undefined);
+      return;
+    }
+    if (name.includes('custom message')) {
+      // The real Pi 1.2.0 custom variant has message, not prompt. Do not treat its content as user input.
+      assert.equal(await beforeStart({
+        type: 'before_agent_start', messageType: 'custom', systemPrompt, systemPromptOptions: {},
+        message: { role: 'custom', customType: 'synthetic', content: 'Use synthetic-skill.',
+          display: false, timestamp: 0 },
+      }, first), undefined);
+      return;
+    }
+    const event = name.includes('legacy')
+      ? { type: 'before_agent_start', prompt: 'Please use synthetic-skill.', systemPrompt }
+      : userEvent;
+    assert.deepEqual(await beforeStart(event, first), {
+      systemPrompt: systemPrompt + '\n<skill_health_warnings>\n'
+        + 'The following skills have known issues. Be extra careful and consider the suggestions:\n'
+        + '- synthetic-skill: Synthetic warning. Check the synthetic result.\n</skill_health_warnings>',
+    });
+    assert.equal(event.systemPrompt, systemPrompt, 'the original event must remain unchanged');
+    return;
+  }
   if (name === 'directory source enables session start without hybrid index') {
     session(); state();
     await handlers.get('session_start')({}, first);
